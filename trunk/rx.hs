@@ -3,6 +3,7 @@
 
 import Maybe
 import Array
+import Debug.Trace
 
 -- get-function : gather a nodes worth of pattern from a pattern-string
 --                returns the segment and the remaining pattern in a tuple
@@ -42,6 +43,7 @@ p2p ((')':_):_)        = error "Unmatched terminating group marker , `)' " -- ca
 p2p ("|":('?':_):_)    = error "Repitition operator `?' applied to procedural alternation operator `|' "
 p2p (s1:s2@("??"):ps)  = ('?':'?': s1) : p2p ps
 p2p (s1:s2@("?"):ps)   = ('?': s1) : p2p ps
+p2p (s1:s2@("+"):ps)   = ('+': s1) : p2p ps
 p2p (s1:s2@("*?"):ps)  = ('*':'?': s1) : p2p ps
 p2p (s1:s2@("*"):ps)   = ('*': s1) : p2p ps
 p2p (s1:ps)            = s1 : p2p ps
@@ -106,25 +108,31 @@ exn ('(':cs) n l = let ~( ni , ns , x ) = oexn (gs Sub [] $ p2p $ lfn cs ) n l
                    in
                      ( [ ni ] ++ ns , x )
 
--- non-greedy
+-- least from zero or one
 exn ('?':'?':cs) n l = let ~( ni , ns , x ) = oexn (gs Top [] $ p2p $ lfn cs ) (n+1) x
                    in
                      ( [ [ ( Nothing , l ) , ( Nothing , (n+1) ) ] ] ++ [ ni ] ++ ns , x )
 
--- greedy
+-- most from zero or one
 exn ('?':cs) n l = let ~( ni , ns , x ) = oexn (gs Top [] $ p2p $ lfn cs ) (n+1) x
                    in
                      ( [ [ ( Nothing , (n+1) ) , ( Nothing , l ) ] ] ++ [ ni ] ++ ns , x )
 
--- non-greedy
+-- least from zero or more
 exn ('*':'?':cs) n l = let ~( ni , ns , x ) = oexn (gs Top [] $ p2p $ lfn cs ) (n+1) n
                    in
                      ( [ [ ( Nothing , l ) , ( Nothing , (n+1) ) ] ] ++ [ ni ] ++ ns , x )
 
--- greedy
+-- most from zero or more
 exn ('*':cs) n l = let ~( ni , ns , x ) = oexn (gs Top [] $ p2p $ lfn cs ) (n+1) n
                    in
                      ( [ [ ( Nothing , (n+1) ) , ( Nothing , l ) ] ] ++ [ ni ] ++ ns , x )
+
+-- most from at least one
+exn ('+':cs) n l = let ~( ni , ns , x ) = oexn (gs Top [] $ p2p $ lfn cs ) (n+2) (n+1)
+                   in
+                     ( [ [ (Nothing , n+2 ) ] , [ ( Nothing , n+2 ) , (Nothing , l) ] ] ++ [ ni ] ++ ns , x )
+                     
 
 exn (c:_)    n l = ( [ [ ( Just c , l ) ] ] , (n+1) )
 exn []       n l = ( [ [ ( Nothing , l ) ] ] , (n+1) )
@@ -162,10 +170,19 @@ matches string pattern = let ( ruleset , endpos ) = ruleset_compile pattern
 
 (~=) = matches
 
-main = let number = "(0|1|2|3|4|5|6|7|8|9)"
-       in do
-           print $ ruleset_compile number
-           print $ "abcz" ~= "abc"
-           print $ "aaaz" ~= "a*"
-           print $ "abcz" ~= "abc"
-           print $ "abcz" ~= "ab?c"
+-- tests
+main = do
+  print $ "fail"      ~= "to match"
+  print $ "abcde"     ~= "abcde"
+  print $ "aaaae"     ~= "a*e"
+  print $ "e"         ~= "a*e"
+  print $ "aaaae"     ~= "a+e"
+  print $ "e"         ~= "a+e"
+  print $ "aaaae"     ~= "a?e"
+  print $ "ae"        ~= "a?e"
+  print $ "e"         ~= "a?e"
+  print $ "dogdogdog" ~= "(dog)*"
+
+           
+
+
