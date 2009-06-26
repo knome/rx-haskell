@@ -15,16 +15,24 @@ data RxRule a = RxMatch a         -- match a character
               | RxLookBehind      -- this will mean saving characters to match against and will likely be difficult to pull off
               | RxNonCapturing    -- this will mean being able to preform a search and simply failing or continuing once it matches without capturing anything ( used for lookahead assertion )
               | RxNonBacktracking -- discards all backtracking information from a subpattern matched within it
+              | PenDown Int       -- begin recording match info into a paren-group dropping any previous match
+              | PenUp Int         -- stop recording match info for the given paren-group, LOGO ftw
+              | RxMarkBack        -- place a marker into the list of backtrace options
+              | RxPopBack         -- remove all backtrace entries upto and including marker ( used to implement '(?>' )
               | RxSuccess         -- when this rule is encountered the regular expressions has performed a successful match
                 deriving ( Show , Eq )
 
 type RxRuleSet a = [ RxRule a ]
 
 main = do
-  testrun "^a$" "a"
-  testrun "^a$" "ab"
-  testrun "^( *foo *)*$" "foo foo foo foo foo"
-  testrun "^( *foo *)*$" "foo foo foo foo fo"
+  testrun "(?:a*)b" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac"
+
+--  testrun "<(.*?)>(?:(.)*)<.*>" "<b>hello world</b>"
+
+--  testrun "he(ll)o" "hello"
+--  testrun "^a$" "ab"
+--  testrun "^( *foo *)*$" "foo foo foo foo foo"
+--  testrun "^( *foo *)*$" "foo foo foo foo fo"
 
 testrun pattern target = do
   print $ pattern
@@ -48,10 +56,14 @@ testrun pattern target = do
 opts = RxOptions { rx_option_multiline   = False ,
                    rx_option_ignore_case = False }
 
-compile :: RxOptions -> String -> RxRuleSet Char
-compile options pattern = let ( r , ralr , rp ) = eor options 0 ralr pattern
+-- returns list of rules and number of subgroups that will be matched
+compile :: RxOptions -> String -> ( RxRuleSet Char , Int )
+compile options pattern = let ( r , ralr , rp , np ) = eor options 0 0 ralr pattern
                           in
-                            r ++ [ RxSuccess ]
+                            case rp of
+                              [] -> trace (show np) $
+                                    ( r ++ [ RxSuccess ] , np )
+                              _  -> error "Unbalanced Parenthesis : Extraneous Closing Parenthesis"
     where
       -- eor :: options -> start rule -> on-success-goto-rule -> pattern -> ( ruleset , rule-after-last-rule , remaining-pattern )
       -- o     : options 
@@ -67,118 +79,166 @@ compile options pattern = let ( r , ralr , rp ) = eor options 0 ralr pattern
       -- nrp   : next remaining pattern
       -- rap   : remaining after pattern
       -- sb    : start bump , amount to offset initial rule in preparation for prepending instructions
-      
-      eor :: RxOptions -> Int -> Int -> String -> ( RxRuleSet Char , Int , String )
-      eor o sr osgr p = let ( ~( r  , ralr  , rp ) ,
-                              ~( sb , ~( fr , fralr , fp ) ) ) = ( ear o (sr + sb) p ,
-                                                                   case rp of
-                                                                     []        -> ( 0 , ( r , ralr , []  ) )
-                                                                     (')':rap) -> ( 0 , ( r , ralr , rap ) )
-                                                                     ('|':rop) -> ( 1 , let ( nr , nralr , nrp ) = eor o (ralr + 1) osgr rop
-                                                                                        in
-                                                                                          ( [ RxBack (ralr + 1) ] ++ r ++ [ RxGoto osgr ] ++ nr , nralr , nrp ) )
-                                                                     _         -> error "Unbalanced Parenthesis" )
+      -- np    : next parenthetical group identifier
+
+      eor :: RxOptions -> Int -> Int -> Int -> String -> ( RxRuleSet Char , Int , String , Int )
+      eor o np sr osgr p = let ( ~( r  , ralr  , rp , rnp ) ,
+                                 ~( sb , ~( fr , fralr , fp , fnp ) ) ) = ( ear o np (sr + sb) p ,
+                                                                            case rp of
+                                                                              []        -> ( 0 , ( r , ralr , [] , rnp ) )
+                                                                              (')':_)   -> ( 0 , ( r , ralr , rp , rnp ) )
+                                                                              ('|':rop) -> ( 1 , let ( nr , nralr , nrp , nnp ) = eor o rnp (ralr + 1) osgr rop
+                                                                                                 in
+                                                                                                   ( [ RxBack (ralr + 1) ] ++ r ++ [ RxGoto osgr ] ++ nr , nralr , nrp , nnp ) ) )
                         in
-                          ( fr , fralr , fp )
+                          ( fr , fralr , fp , fnp )
       
       -- ear :: options -> start rule -> pattern -> ( ruleset , rule-after-last-rule , remaining-pattern )
-      ear :: RxOptions -> Int -> String -> ( RxRuleSet Char , Int , String )
-      ear o sr p = let ( r , ralr , rp ) = erwr o p sr
-                   in
-                     case rp of
-                       []      -> ( r , ralr , [] )
-                       (')':_) -> ( r , ralr , rp )
-                       ('|':_) -> ( r , ralr , rp )
-                       _       -> let ( nr , nralr , nrp ) = ear o ralr rp
-                                  in
-                                    ( r ++ nr , nralr , nrp )
+      ear :: RxOptions -> Int -> Int -> String -> ( RxRuleSet Char , Int , String , Int )
+      ear o np sr p = let ( r , ralr , rp , rnp ) = erwr o np p sr
+                      in
+                        case rp of
+                          []      -> ( r , ralr , [] , rnp )
+                          (')':_) -> ( r , ralr , rp , rnp )
+                          ('|':_) -> ( r , ralr , rp , rnp )
+                          _       -> let ( nr , nralr , nrp , nnp ) = ear o rnp ralr rp
+                                     in
+                                       ( r ++ nr , nralr , nrp , nnp )
       
       -- erwr :: extract rule with repitition
-      erwr :: RxOptions -> String -> Int -> ( RxRuleSet Char , Int , String )
-      erwr o p sr = let x = \cs -> er o cs p
-                        ( ~( r , ralr , nrp ) ,
-                          ~( sb , ~( fr , fralr , fp ) ) ) = ( x (sr + sb) ,
-                                                               case nrp of
-                                                                 ('?':'?':prp) -> ( 2 , ( [ RxBack (sr + sb) , RxGoto ralr ] ++ r , ralr , prp ) )
-                                                                 ('?':prp)     -> ( 1 , ( [ RxBack ralr ] ++ r , ralr , prp ) )
-                                                                 ('*':'?':prp) -> ( 2 , ( [ RxBack (sr + sb) , RxGoto (ralr + 1) ] ++ r ++ [ RxGoto sr ] , ralr + 1 , prp ) )
-                                                                 ('*':prp)     -> ( 1 , ( [ RxBack (ralr + 1) ] ++ r ++ [ RxGoto sr ] , ralr + 1 , prp ) )
-                                                                 ('+':'?':prp) -> let ( ir , iralr , _ ) = x sr
-                                                                                  in
-                                                                                    ( iralr + 2 - sr , ( ir ++ [ RxBack (sr + sb) , RxGoto (ralr + 1) ] ++ r ++ [ RxGoto iralr ], ralr + 1 , prp ) )
-                                                                 ('+':prp)     -> let ( ir , iralr , _ ) = x sr
-                                                                                  in
-                                                                                    ( iralr + 1 - sr , ( ir ++ [ RxBack (ralr + 1) ] ++ r ++ [ RxGoto iralr ] , ralr + 1 , prp ) )
-                                                                 ('{':prp)     -> error "i dont know how to range"  -- range followed by question mark is lazy range
-                                                                 _             -> ( 0 , ( r , ralr , nrp ) ) )
-                    in
-                      ( fr , fralr , fp )
+      erwr :: RxOptions -> Int -> String -> Int -> ( RxRuleSet Char , Int , String , Int )
+      erwr o np p sr = let x = \cs -> er o np cs p
+                           ( ~( r , ralr , nrp , rnp ) ,
+                             ~( sb , ~( fr , fralr , fp ) ) ) = ( x (sr + sb) ,
+                                                                  case nrp of
+                                                                    ('?':'?':prp) -> ( 2 , ( [ RxBack (sr + sb) , RxGoto ralr ] ++ r , ralr , prp ) )
+                                                                    ('?':prp)     -> ( 1 , ( [ RxBack ralr ] ++ r , ralr , prp ) )
+                                                                    ('*':'?':prp) -> ( 2 , ( [ RxBack (sr + sb) , RxGoto (ralr + 1) ] ++ r ++ [ RxGoto sr ] , ralr + 1 , prp ) )
+                                                                    ('*':prp)     -> ( 1 , ( [ RxBack (ralr + 1) ] ++ r ++ [ RxGoto sr ] , ralr + 1 , prp ) )
+                                                                    ('+':'?':prp) -> let ( ir , iralr , _ , _ ) = x sr
+                                                                                     in
+                                                                                       ( iralr + 2 - sr , ( ir ++ [ RxBack (sr + sb) , RxGoto (ralr + 1) ] ++ r ++ [ RxGoto iralr ], ralr + 1 , prp ) )
+                                                                    ('+':prp)     -> let ( ir , iralr , _ , _ ) = x sr
+                                                                                     in
+                                                                                       ( iralr + 1 - sr , ( ir ++ [ RxBack (ralr + 1) ] ++ r ++ [ RxGoto iralr ] , ralr + 1 , prp ) )
+                                                                    ('{':prp)     -> error "i dont know how to range"  -- range followed by question mark is lazy range
+                                                                    _             -> ( 0 , ( r , ralr , nrp ) ) )
+                       in
+                         ( fr , fralr , fp , rnp )
       
       -- er :: extract rule
-      er :: RxOptions -> Int -> String -> ( RxRuleSet Char , Int , String )
+      er :: RxOptions -> Int -> Int -> String -> ( RxRuleSet Char , Int , String , Int )
+      
+      er o np sr ('?':rp)    = error "floating maybe operator ( ? )"
+      er o np sr ('*':rp)    = error "floating glob operator ( * )"
+      er o np sr ('+':rp)    = error "floating 1+ glob operator ( + )"
 
-      er o sr ('?':rp)    = error "floating maybe operator ( ? )"
-      er o sr ('*':rp)    = error "floating glob operator ( * )"
-      er o sr ('+':rp)    = error "floating 1+ glob operator ( + )"
-      
-      er o sr ('(':rp)    = let ( nr , nralr , nrp ) = eor o sr nralr rp 
-                            in
-                              ( nr , nralr , nrp )
+      er o np sr (p@(')':_)) = ( [] , sr , p , np ) -- catches empty group '()'
 
-      er o sr ('[':rp)    = error "character ranges not yet supported"
-      
-      er o sr ('^':rp)    = ( [ RxMatchStart ]    , sr + 1 , rp )
-      er o sr ('$':rp)    = ( [ RxMatchEnd ]      , sr + 1 , rp )
-      
-      er (o@RxOptions{ rx_option_ignore_case = True }) sr p = error "rx option ignore case not yet supported"
-      er (o@RxOptions{ rx_option_multiline = True })   sr p = error "rx option multiline not yet supported"
-      
-      er o sr ('.':rp)    = ( [ RxMatchAny ]      , sr + 1 , rp )
-      
-      er o sr ('\\':l:rp) = ( [ RxMatch l ]       , sr + 1 , rp )
-      er o sr (l:rp)      = ( [ RxMatch l ]       , sr + 1 , rp )
-      er o sr []          = ( [ RxGoto (sr + 1) ] , sr + 1 , [] ) -- goto one ahead , a noop
+      er o np sr ('(':'?':':':rp) = let ( nr , nralr , nrp , nnp ) = eor o np sr nralr rp
+                                    in
+                                      case nrp of 
+                                        (')':frp) -> ( nr , nralr , frp , nnp )
+                                        _         -> error "Unbalanced Parenthesis on NonCapturing Group '(?:'"
 
-run :: RxRuleSet Char -> String -> Maybe ( Bool , String , String )
-run rs t = let result = s True False [] [] rs t 0
+      er o np sr ('(':'?':'>':rp) = let ( nr , nralr , nrp , nnp ) = eor o np (sr + 1) nralr rp
+                                    in
+                                      case nrp of
+                                        (')':frp) -> ( [RxMarkBack] ++ nr ++ [RxPopBack] , nralr + 1 , frp , nnp )
+                                        _         -> error "Unbalanced Parenthesis on Once-Only Group"
+
+
+      er o np sr ('(':'?':_) = error "Unknown extension group '(?'"
+      
+      er o np sr ('(':rp)    = let ( nr , nralr , nrp , nnp ) = eor o (np + 1) (sr + 1) nralr rp
+                               in
+                                 case nrp of
+                                   (')':frp) -> ( [ PenDown np ] ++ nr ++ [ PenUp np ] , nralr + 1 , frp , nnp )
+                                   _         -> error "Unbalanced Parenthesis : Missing Close"
+      
+      er o np sr ('[':rp)    = error "character ranges not yet supported"
+      
+      er o np sr ('^':rp)    = ( [ RxMatchStart ]    , sr + 1 , rp , np )
+      er o np sr ('$':rp)    = ( [ RxMatchEnd ]      , sr + 1 , rp , np )
+      
+      er (o@RxOptions{ rx_option_ignore_case = True }) np sr p = error "rx option ignore case not yet supported"
+      er (o@RxOptions{ rx_option_multiline = True })   np sr p = error "rx option multiline not yet supported"
+      
+      er o np sr ('.':rp)    = ( [ RxMatchAny ]      , sr + 1 , rp , np )
+      
+      er o np sr ('\\':l:rp) = ( [ RxMatch l ]       , sr + 1 , rp , np )
+      er o np sr (l:rp)      = ( [ RxMatch l ]       , sr + 1 , rp , np )
+      er o np sr []          = ( [ RxGoto (sr + 1) ] , sr + 1 , [] , np ) -- goto one ahead , a noop
+
+
+type SubMatch = ( Bool , String )
+
+type BackTrack = ( Bool , Bool , String ,[ SubMatch ] , RxRuleSet Char , String , Int )
+data BtStackEntry = Bt BackTrack
+                  | BtMark
+                    deriving ( Eq )
+
+run :: ( RxRuleSet Char , Int ) -> String -> Maybe ( Bool , String , [ String ] , String )
+run re t = let ( rs , nsm ) = re 
+               result = s True False [] [] (replicate nsm (False,[])) rs t 0
            in
              case result of
-               Just ( success , rmatched , remaining ) -> Just ( success , reverse rmatched , remaining )
-               Nothing                                 -> Nothing
+               Just ( success , rmatched , submatches , remaining ) -> Just ( success , reverse rmatched , map (reverse . snd) submatches , remaining )
+               Nothing                                              -> Nothing
     where
       -- step at-start current-boundary-matched matches backtracks ruleset target current-rule
-
       back b = 
           trace ("going back") $
           case b of
             [] -> Nothing
-            ((_as , _cbm , _m , _rs , _t , _cr):rb) -> s _as _cbm _m rb _rs _t _cr
+            (BtMark:rb) -> back rb
+            (Bt (_as , _cbm , _m , _sm , _rs , _t , _cr):rb) -> s _as _cbm _m rb _sm _rs _t _cr
 
-      s :: Bool -> Bool -> String -> [ ( Bool , Bool , String , RxRuleSet Char , String , Int ) ] -> RxRuleSet Char -> String -> Int -> Maybe ( Bool , String , String )
-      s as cbm m b rs t cr = trace ("[m:"++(show m)++"][t:"++(show t)++"][#b:"++(show $ length b)++"][rs!!cr:"++(show $ rs !! cr)++"]") $ 
-                             case rs !! cr of
-                               RxMatchStart -> case as of
-                                                 True -> s as True m b rs t (cr + 1)
-                                                 _    -> back b
+      smpush :: Char -> SubMatch -> SubMatch
+      smpush c (True,matches) = (True,c:matches)
+      smpush _ inactive       = inactive
 
-                               RxMatchEnd -> case t of
-                                               [] -> s as True m b rs t (cr + 1)
-                                               _ -> back b
+      s :: Bool -> Bool -> String -> [ BtStackEntry ] -> [ SubMatch ] -> RxRuleSet Char -> String -> Int -> 
+           Maybe ( Bool , String , [ SubMatch ] , String )
+      s as cbm m b sm rs t cr = trace ("[m:"++(show m)++"][t:"++(show t)++"][#b:"++(show $ length b)++"][rs!!cr:"++(show $ rs !! cr)++"]") $ 
+                                case rs !! cr of
+                                  RxMatchStart -> case as of
+                                                    True -> s as True m b sm rs t (cr + 1)
+                                                    _    -> back b
+
+                                  RxMatchEnd -> case t of
+                                                  [] -> s as True m b sm rs t (cr + 1)
+                                                  _ -> back b
                                
-                               RxMatch v -> case t of
-                                              (h:rt) -> if v == h
-                                                        then
-                                                            s False False (v:m) b rs rt (cr + 1)
-                                                        else
-                                                            back b
-                                              _      -> back b
+                                  RxMatch v -> case t of
+                                                 (h:rt) -> if v == h
+                                                           then
+                                                               s False False (h:m) b (map (smpush h) sm) rs rt (cr + 1) -- todo update sm
+                                                           else
+                                                               back b
+                                                 _      -> back b
+                                                           
+                                  RxMatchAny -> case t of
+                                                  (h:rt) -> s False False (h:m) b (map (smpush h) sm) rs rt (cr + 1)
+                                                  _      -> back b
+                                  
+                                  RxGoto r -> s as cbm m b sm rs t r
+                                  
+                                  RxBack r -> s as cbm m (Bt (as,cbm,m,sm,rs,t,r):b) sm rs t (cr+1)
 
-                               RxMatchAny -> case t of
-                                               (h:rt) -> s False False (h:m) b rs rt (cr + 1)
-                                               _      -> back b
+                                  RxMarkBack -> s as cbm m (BtMark:b) sm rs t (cr+1)
 
-                               RxGoto r -> s as cbm m b rs t r
+                                  RxPopBack -> s as cbm m ( tail $ dropWhile (/= BtMark) b) sm rs t (cr + 1)
+                                  
+                                  PenDown p -> let (pre , with) = splitAt p sm
+                                                   post = tail with
+                                               in
+                                                 s as cbm m b (pre ++ [ (True,[]) ] ++ post) rs t (cr + 1)
 
-                               RxBack r -> s as cbm m ((as,cbm,m,rs,t,r):b) rs t (cr+1)
+                                  PenUp p -> let (pre , with) = splitAt p sm
+                                                 (_,matches) = head with
+                                                 post = tail with
+                                             in
+                                               s as cbm m b (pre ++ [ (False,matches) ] ++ post) rs t (cr + 1)
 
-                               RxSuccess -> Just ( True , m , t )
+                                  RxSuccess -> Just ( True , m , sm , t )
