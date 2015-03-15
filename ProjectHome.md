@@ -1,0 +1,1 @@
+Started as a way to learn Haskell and explore how regexes function, the project now has a working partial implementation.
